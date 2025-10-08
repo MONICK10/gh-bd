@@ -2,7 +2,8 @@
 import express from "express";
 import multer from "multer";
 import path from "path";
-import { pool } from "../db.js";
+import { db } from "../db.js";
+import { collection, doc, getDocs, addDoc, getDoc, query, where, orderBy, updateDoc, increment } from "firebase/firestore";
 
 const router = express.Router();
 
@@ -23,17 +24,17 @@ router.post("/", upload.single("file"), async (req, res) => {
   }
 
   try {
-    const sql = `INSERT INTO discussions (user_id, batch, department, content, file_path, is_public)
-                 VALUES (?, ?, ?, ?, ?, ?)`;
-    const [result] = await pool.query(sql, [
+    const discussionsRef = collection(db, "discussions");
+    const docRef = await addDoc(discussionsRef, {
       user_id,
-      batch || null,
-      department || null,
+      batch: batch || null,
+      department: department || null,
       content,
       file_path,
-      is_public === "true" || is_public === true ? 1 : 0
-    ]);
-    res.json({ success: true, id: result.insertId });
+      is_public: is_public === "true" || is_public === true,
+      created_at: new Date()
+    });
+    res.json({ success: true, id: docRef.id });
   } catch(err) {
     console.error("POST /discussions error:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -49,11 +50,27 @@ router.get("/", async (req, res) => {
   }
 
   try {
-    const sql = `SELECT d.*, u.name FROM discussions d
-                 JOIN users u ON d.user_id = u.id
-                 WHERE d.batch = ? AND d.department = ?
-                 ORDER BY d.created_at DESC`;
-    const [rows] = await pool.query(sql, [batch, department]);
+    const discussionsRef = collection(db, "discussions");
+    const q = query(
+      discussionsRef,
+      where("batch", "==", batch),
+      where("department", "==", department),
+      orderBy("created_at", "desc")
+    );
+    const querySnapshot = await getDocs(q);
+    
+    const rows = await Promise.all(
+      querySnapshot.docs.map(async (discussionDoc) => {
+        const discussionData = discussionDoc.data();
+        const userDoc = await getDoc(doc(db, "users", discussionData.user_id));
+        return {
+          id: discussionDoc.id,
+          ...discussionData,
+          name: userDoc.data().name
+        };
+      })
+    );
+    
     res.json(rows);
   } catch(err) {
     console.error("GET /discussions error:", err);
@@ -66,11 +83,26 @@ router.get("/department/:dept", async (req, res) => {
   const department = req.params.dept;
 
   try {
-    const sql = `SELECT d.*, u.name FROM discussions d
-                 JOIN users u ON d.user_id = u.id
-                 WHERE d.department = ?
-                 ORDER BY d.created_at DESC`;
-    const [rows] = await pool.query(sql, [department]);
+    const discussionsRef = collection(db, "discussions");
+    const q = query(
+      discussionsRef,
+      where("department", "==", department),
+      orderBy("created_at", "desc")
+    );
+    const querySnapshot = await getDocs(q);
+    
+    const rows = await Promise.all(
+      querySnapshot.docs.map(async (discussionDoc) => {
+        const discussionData = discussionDoc.data();
+        const userDoc = await getDoc(doc(db, "users", discussionData.user_id));
+        return {
+          id: discussionDoc.id,
+          ...discussionData,
+          name: userDoc.data().name
+        };
+      })
+    );
+    
     res.json(rows);
   } catch(err) {
     console.error("GET /department/:dept error:", err);
@@ -88,10 +120,17 @@ router.post("/department", upload.single("file"), async (req, res) => {
   }
 
   try {
-    const sql = `INSERT INTO discussions (user_id, batch, department, content, file_path, is_public)
-                 VALUES (?, NULL, ?, ?, ?, 0)`; // batch = NULL for department-level
-    const [result] = await pool.query(sql, [user_id, department, content, file_path]);
-    res.json({ success: true, id: result.insertId });
+    const discussionsRef = collection(db, "discussions");
+    const docRef = await addDoc(discussionsRef, {
+      user_id,
+      batch: null, // batch = null for department-level
+      department,
+      content,
+      file_path,
+      is_public: false,
+      created_at: new Date()
+    });
+    res.json({ success: true, id: docRef.id });
   } catch(err) {
     console.error("POST /department error:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -101,11 +140,26 @@ router.post("/department", upload.single("file"), async (req, res) => {
 // ---------------- GET public posts ----------------
 router.get("/public/all", async (req, res) => {
   try {
-    const sql = `SELECT d.*, u.name FROM discussions d
-                 JOIN users u ON d.user_id = u.id
-                 WHERE d.is_public = 1
-                 ORDER BY d.created_at DESC`;
-    const [rows] = await pool.query(sql);
+    const discussionsRef = collection(db, "discussions");
+    const q = query(
+      discussionsRef,
+      where("is_public", "==", true),
+      orderBy("created_at", "desc")
+    );
+    const querySnapshot = await getDocs(q);
+    
+    const rows = await Promise.all(
+      querySnapshot.docs.map(async (discussionDoc) => {
+        const discussionData = discussionDoc.data();
+        const userDoc = await getDoc(doc(db, "users", discussionData.user_id));
+        return {
+          id: discussionDoc.id,
+          ...discussionData,
+          name: userDoc.data().name
+        };
+      })
+    );
+    
     res.json(rows);
   } catch(err) {
     console.error("GET /public/all error:", err);
@@ -121,10 +175,20 @@ router.post('/:id/like', async (req, res) => {
   if (!user_id) return res.status(400).json({ success: false, message: "Missing user_id" });
 
   try {
-    const sql = `INSERT INTO post_likes (post_id, user_id)
-                 VALUES (?, ?)
-                 ON DUPLICATE KEY UPDATE id=id`;
-    await pool.query(sql, [postId, user_id]);
+    // Check if like already exists
+    const likesRef = collection(db, "post_likes");
+    const q = query(likesRef, where("post_id", "==", postId), where("user_id", "==", user_id));
+    const querySnapshot = await getDocs(q);
+    
+    if (querySnapshot.empty) {
+      // Add new like
+      await addDoc(likesRef, {
+        post_id: postId,
+        user_id,
+        created_at: new Date()
+      });
+    }
+    
     res.json({ success: true });
   } catch(err) {
     console.error("POST /:id/like error:", err);
@@ -136,8 +200,11 @@ router.get('/:id/likes', async (req, res) => {
   const postId = req.params.id;
 
   try {
-    const [rows] = await pool.query(`SELECT COUNT(*) as total FROM post_likes WHERE post_id = ?`, [postId]);
-    res.json(rows[0]);
+    const likesRef = collection(db, "post_likes");
+    const q = query(likesRef, where("post_id", "==", postId));
+    const querySnapshot = await getDocs(q);
+    
+    res.json({ total: querySnapshot.size });
   } catch(err) {
     console.error("GET /:id/likes error:", err);
     res.status(500).json({ success: false });
@@ -152,9 +219,14 @@ router.post('/:id/reply', upload.single('file'), async (req, res) => {
   if (!user_id || !content) return res.status(400).json({ success: false, message: "Missing user_id or content" });
 
   try {
-    const sql = `INSERT INTO post_replies (post_id, user_id, content, file_path)
-                 VALUES (?, ?, ?, ?)`;
-    await pool.query(sql, [postId, user_id, content, file_path]);
+    const repliesRef = collection(db, "post_replies");
+    await addDoc(repliesRef, {
+      post_id: postId,
+      user_id,
+      content,
+      file_path,
+      created_at: new Date()
+    });
     res.json({ success: true });
   } catch(err) {
     console.error("POST /:id/reply error:", err);
@@ -166,11 +238,26 @@ router.get('/:id/replies', async (req, res) => {
   const postId = req.params.id;
 
   try {
-    const sql = `SELECT r.*, u.name FROM post_replies r
-                 JOIN users u ON r.user_id = u.id
-                 WHERE r.post_id = ?
-                 ORDER BY r.created_at ASC`;
-    const [rows] = await pool.query(sql, [postId]);
+    const repliesRef = collection(db, "post_replies");
+    const q = query(
+      repliesRef,
+      where("post_id", "==", postId),
+      orderBy("created_at", "asc")
+    );
+    const querySnapshot = await getDocs(q);
+    
+    const rows = await Promise.all(
+      querySnapshot.docs.map(async (replyDoc) => {
+        const replyData = replyDoc.data();
+        const userDoc = await getDoc(doc(db, "users", replyData.user_id));
+        return {
+          id: replyDoc.id,
+          ...replyData,
+          name: userDoc.data().name
+        };
+      })
+    );
+    
     res.json(rows);
   } catch(err) {
     console.error("GET /:id/replies error:", err);

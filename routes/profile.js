@@ -1,5 +1,6 @@
 import express from "express";
-import { pool } from "../db.js";
+import { db } from "../db.js";
+import { collection, doc, getDocs, getDoc, updateDoc, query, where } from "firebase/firestore";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -26,30 +27,51 @@ const upload = multer({ storage });
 router.get("/:id", async (req, res) => {
   const id = req.params.id;
   try {
-    const [userResults] = await pool.query(
-      "SELECT id, name, email, nickname, bio, avatar_url, created_at FROM users WHERE id = ?",
-      [id]
-    );
-    if (!userResults.length) return res.status(404).json({ message: "User not found" });
-    const user = userResults[0];
+    // Get user document
+    const userDoc = await getDoc(doc(db, "users", id));
+    if (!userDoc.exists()) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    
+    const user = {
+      id: userDoc.id,
+      name: userDoc.data().name,
+      email: userDoc.data().email,
+      nickname: userDoc.data().nickname || null,
+      bio: userDoc.data().bio || null,
+      avatar_url: userDoc.data().avatar_url || null,
+      created_at: userDoc.data().createdAt
+    };
 
-    const [[friendsCountRes]] = await pool.query(
-      "SELECT COUNT(*) AS count FROM friends WHERE (user_id = ? OR friend_id = ?) AND status = 'accepted'",
-      [id, id]
-    );
+    // Count friends
+    const friendsRef = collection(db, "friends");
+    const q1 = query(friendsRef, where("user_id", "==", id), where("status", "==", "accepted"));
+    const q2 = query(friendsRef, where("friend_id", "==", id), where("status", "==", "accepted"));
+    
+    const [snapshot1, snapshot2] = await Promise.all([getDocs(q1), getDocs(q2)]);
+    const friendsCount = snapshot1.size + snapshot2.size;
 
-    const [pendingRes] = await pool.query(
-      `SELECT f.id AS request_id, f.user_id AS requester_id, u.name AS requester_name, u.avatar_url
-       FROM friends f
-       JOIN users u ON f.user_id = u.id
-       WHERE f.friend_id = ? AND f.status = 'pending'`,
-      [id]
+    // Get pending friend requests
+    const pendingQuery = query(friendsRef, where("friend_id", "==", id), where("status", "==", "pending"));
+    const pendingSnapshot = await getDocs(pendingQuery);
+    
+    const pendingRequests = await Promise.all(
+      pendingSnapshot.docs.map(async (friendDoc) => {
+        const requesterId = friendDoc.data().user_id;
+        const requesterDoc = await getDoc(doc(db, "users", requesterId));
+        return {
+          request_id: friendDoc.id,
+          requester_id: requesterId,
+          requester_name: requesterDoc.data().name,
+          avatar_url: requesterDoc.data().avatar_url || null
+        };
+      })
     );
 
     res.json({
       user,
-      friendsCount: friendsCountRes.count,
-      pendingRequests: pendingRes || [],
+      friendsCount,
+      pendingRequests,
     });
   } catch (err) {
     console.error(err);
@@ -63,10 +85,13 @@ router.put("/", async (req, res) => {
   if (!userId) return res.status(400).json({ message: "userId required" });
 
   try {
-    await pool.query(
-      "UPDATE users SET name = ?, nickname = ?, bio = ? WHERE id = ?",
-      [name || null, nickname || null, bio || null, userId]
-    );
+    const userRef = doc(db, "users", userId);
+    await updateDoc(userRef, {
+      name: name || null,
+      nickname: nickname || null,
+      bio: bio || null,
+      updatedAt: new Date()
+    });
     res.json({ message: "Profile updated" });
   } catch (err) {
     console.error(err);
@@ -81,7 +106,11 @@ router.post("/upload", upload.single("avatar"), async (req, res) => {
 
   const avatarUrl = `/uploads/${req.file.filename}`;
   try {
-    await pool.query("UPDATE users SET avatar_url = ? WHERE id = ?", [avatarUrl, userId]);
+    const userRef = doc(db, "users", userId);
+    await updateDoc(userRef, {
+      avatar_url: avatarUrl,
+      updatedAt: new Date()
+    });
     res.json({ avatarUrl });
   } catch (err) {
     console.error(err);

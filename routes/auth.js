@@ -1,6 +1,7 @@
 import express from "express";
 import bcrypt from "bcrypt";
-import { pool } from "../db.js"; // <-- pool exists
+import { db } from "../db.js";
+import { collection, doc, getDocs, addDoc, query, where } from "firebase/firestore";
 
 const router = express.Router();
 
@@ -13,17 +14,26 @@ router.post("/register", async (req, res) => {
 
   try {
     // Check if email exists
-    const [existing] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (existing.length > 0) return res.status(400).json({ message: "Email already exists" });
+    const usersRef = collection(db, "users");
+    const q = query(usersRef, where("email", "==", email));
+    const querySnapshot = await getDocs(q);
+    
+    if (!querySnapshot.empty) {
+      return res.status(400).json({ message: "Email already exists" });
+    }
 
     // Hash password
     const hash = await bcrypt.hash(password, 10);
 
     // Insert new user
-    await pool.query(
-      "INSERT INTO users (name, email, password, department, batch) VALUES (?, ?, ?, ?, ?)",
-      [name, email, hash, department, batch]
-    );
+    await addDoc(usersRef, {
+      name,
+      email,
+      password: hash,
+      department,
+      batch,
+      createdAt: new Date()
+    });
 
     res.status(201).json({ message: "✅ Registered successfully" });
   } catch (err) {
@@ -40,14 +50,30 @@ router.post("/login", async (req, res) => {
     return res.status(400).json({ message: "Email and password required" });
 
   try {
-    const [rows] = await pool.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (rows.length === 0) return res.status(400).json({ message: "User not found" });
+    const usersRef = collection(db, "users");
+    const q = query(usersRef, where("email", "==", email));
+    const querySnapshot = await getDocs(q);
+    
+    if (querySnapshot.empty) {
+      return res.status(400).json({ message: "User not found" });
+    }
 
-    const user = rows[0];
+    const userDoc = querySnapshot.docs[0];
+    const user = { id: userDoc.id, ...userDoc.data() };
+    
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: "Incorrect password" });
 
-    res.json({ message: "✅ Login successful!", user: { id: user.id, name: user.name, email: user.email, batch: user.batch, department: user.department } });
+    res.json({ 
+      message: "✅ Login successful!", 
+      user: { 
+        id: user.id, 
+        name: user.name, 
+        email: user.email, 
+        batch: user.batch, 
+        department: user.department 
+      } 
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Database error" });

@@ -1,5 +1,6 @@
 import express from "express";
-import { pool } from "../db.js";
+import { db } from "../db.js";
+import { collection, doc, getDocs, addDoc, query, where, orderBy, getDoc } from "firebase/firestore";
 
 const router = express.Router();
 
@@ -8,10 +9,25 @@ router.get("/:userId", async (req, res) => {
   const userId = req.params.userId;
 
   try {
-    const [results] = await pool.query(
-      "SELECT c.id, c.content, c.created_at, u.name FROM chats c JOIN users u ON c.user_id = u.id WHERE c.user_id = ? ORDER BY c.created_at ASC",
-      [userId]
-    );
+    // Get user info first
+    const userDoc = await getDoc(doc(db, "users", userId));
+    if (!userDoc.exists()) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    const userName = userDoc.data().name;
+
+    // Get chats for the user
+    const chatsRef = collection(db, "chats");
+    const q = query(chatsRef, where("user_id", "==", userId), orderBy("created_at", "asc"));
+    const querySnapshot = await getDocs(q);
+    
+    const results = querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      content: doc.data().content,
+      created_at: doc.data().created_at,
+      name: userName
+    }));
+
     res.json(results);
   } catch (err) {
     console.error(err);
@@ -28,10 +44,13 @@ router.post("/", async (req, res) => {
   }
 
   try {
-    await pool.query(
-      "INSERT INTO chats (user_id, content, created_at) VALUES (?, ?, NOW())",
-      [userId, content]
-    );
+    const chatsRef = collection(db, "chats");
+    await addDoc(chatsRef, {
+      user_id: userId,
+      content,
+      created_at: new Date()
+    });
+    
     res.status(201).json({ message: "Post added successfully!" });
   } catch (err) {
     console.error(err);

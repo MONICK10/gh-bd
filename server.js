@@ -6,6 +6,7 @@ import profileRoutes from "./routes/profile.js";
 import multer from 'multer';
 import path from 'path';
 import discussionRoutes from "./routes/discussions.js";
+import "./db.js"; // Import Firebase configuration
 
 
 const app = express();
